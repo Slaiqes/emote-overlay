@@ -19,15 +19,99 @@ const config = {
     emotes: [],
 };
 
+// --- FIX: show "invalid channel" helper + show-on-load ---
+function showInvalidChannel() {
+    $("#errors").html(
+        `Invalid channel. Please enter a channel name in the URL. Example: https://emote.slaiqe.gg/?channel=forsen`
+    ).show();
+}
+$(function () {
+    if (!config.channel) showInvalidChannel();
+});
+
+// ---- NEW: slide-in/out state ----
+let streakHideTimeout = null;
+let streakShown = false;
+
+// Margin from each screen edge in px (tweak with ?edgeMargin=NN)
+const EDGE_MARGIN = Number(url.searchParams.get("edgeMargin") || 32);
+// How far off-screen (px) the streak slides from/to
+const SLIDE_OFFSET = Number(url.searchParams.get("slideOffset") || 320);
+// Idle time (ms) before sliding out
+const IDLE_BEFORE_HIDE = Number(url.searchParams.get("streakIdleMs") || 2000);
+
+// ---------- Corner placement + motion (horizontal slide) ----------
+function getCornerPlacement(emoteLocation) {
+    // We’ll slide horizontally “on the same line” as the badge/emote.
+    // Left corners slide in from LEFT (negative X), right corners from RIGHT (positive X).
+    switch (emoteLocation) {
+        case 1: // top-left
+            return {
+                css: { position: "fixed", top: EDGE_MARGIN, left: EDGE_MARGIN },
+                axis: "x",
+                dir: -1,
+            };
+        case 2: // bottom-left
+            return {
+                css: { position: "fixed", bottom: EDGE_MARGIN - 20, left: EDGE_MARGIN },
+                axis: "x",
+                dir: -1,
+            };
+        case 3: // bottom-right
+            return {
+                css: { position: "fixed", bottom: EDGE_MARGIN - 20, right: EDGE_MARGIN },
+                axis: "x",
+                dir: 1,
+            };
+        case 4: // top-right
+            return {
+                css: { position: "fixed", top: EDGE_MARGIN, right: EDGE_MARGIN },
+                axis: "x",
+                dir: 1,
+            };
+        default: // fallback to top-left
+            return {
+                css: { position: "fixed", top: EDGE_MARGIN, left: EDGE_MARGIN },
+                axis: "x",
+                dir: -1,
+            };
+    }
+}
+
+// Mount/position #main in the chosen corner (true corners for OBS)
+function ensureMainMounted() {
+    const $main = $("#main");
+    $main.empty();
+    const place = getCornerPlacement(config.emoteLocation);
+
+    // Reset all edges, then apply the specific corner
+    $main.css({
+        top: "", right: "", bottom: "", left: "",
+        ...place.css,
+        display: "inline-flex",
+        alignItems: "flex-end",
+        gap: "10px",
+        fontWeight: "bold",
+        transformOrigin: "center",
+        zIndex: 999999,        // keep above everything
+        pointerEvents: "none", // overlay shouldn't block clicks
+    });
+
+    return { $main, place };
+}
+
+// ---------------------------------------------------------------
+
 const getEmotes = async () => {
     // const proxy = "https://tpbcors.herokuapp.com/";
     const proxy = "https://api.roaringiron.com/proxy/";
     console.log(config);
 
-    if (!config.channel)
+    if (!config.channel) {
         return $("#errors").html(
             `Invalid channel. Please enter a channel name in the URL. Example: https://emote.slaiqe.gg/?channel=forsen`
         );
+    }
 
     const twitchId = (
         await (
@@ -154,43 +238,39 @@ const getEmotes = async () => {
         .catch(console.error);
 
     const successMessage = `Successfully loaded ${config.emotes.length} emotes for channel ${config.channel}`;
-
     $("#errors").html(successMessage).delay(2000).fadeOut(300);
     console.log(successMessage, config.emotes);
 };
 
 const findEmoteInMessage = (message) => {
+    const parts = Array.isArray(message) ? message : String(message).split(" ");
     for (const emote of config.emotes.map((a) => a.name)) {
-        if (message.includes(emote)) {
-            return emote;
-        }
+        if (parts.includes(emote)) return emote;
     }
     return null;
 };
 
 const findUrlInEmotes = (emote) => {
     for (const emoteObj of config.emotes) {
-        if (emoteObj.name === emote) {
-            return emoteObj.url;
-        }
+        if (emoteObj.name === emote) return emoteObj.url;
     }
     return null;
 };
 
 const showEmote = (message, rawMessage) => {
-    if (config.showEmoteEnabled) {
-        const emoteUsedPos = rawMessage[4].startsWith("emotes=") ? 4 : 5;
-        const emoteUsed = rawMessage[emoteUsedPos].split("emotes=").pop();
-        const splitMessage = message.split(" ");
+    if (!config.showEmoteEnabled) return;
 
-        if (emoteUsed.length === 0) {
-            const url = findUrlInEmotes(findEmoteInMessage(splitMessage));
-            if (url) return showEmoteEvent(url);
-        } else {
-            const url = `https://static-cdn.jtvnw.net/emoticons/v2/${emoteUsed.split(":")[0]
-                }/default/dark/2.0`;
-            return showEmoteEvent(url);
-        }
+    const emoteUsedPos = rawMessage[4].startsWith("emotes=") ? 4 : 5;
+    const emoteUsed = rawMessage[emoteUsedPos].split("emotes=").pop();
+    const splitMessage = message.split(" ");
+
+    if (emoteUsed.length === 0) {
+        const url = findUrlInEmotes(findEmoteInMessage(splitMessage));
+        if (url) return showEmoteEvent(url);
+    } else {
+        const url = `https://static-cdn.jtvnw.net/emoticons/v2/${emoteUsed.split(":")[0]
+            }/default/dark/2.0`;
+        return showEmoteEvent(url);
     }
 };
 
@@ -227,88 +307,63 @@ const findEmotes = (message, rawMessage) => {
     streakEvent();
 };
 
+// ---- slide horizontally, bump on increase, slide out on idle ----
 const streakEvent = () => {
-    if (config.currentStreak.streak >= config.minStreak && config.streakEnabled) {
-        $("#main").empty();
-        $("#main").css({
-            "position": "absolute",
-            "display": "block"
+    if (!(config.currentStreak.streak >= config.minStreak && config.streakEnabled)) return;
+
+    const firstShow = !streakShown;
+
+    const { $main, place } = ensureMainMounted();
+
+    // ✅ Build content in this order: [amount] [emote] [text]
+    // Keep "original" feel by using plain text nodes (no extra wrappers/styles).
+    $main.empty();
+    $main.append("x" + config.currentStreak.streak + " ");     // streak amount
+    $("<img />", { src: config.currentStreak.url }).appendTo($main); // emote image
+    $main.append(" " + config.emoteStreakEndingText);          // trailing text (e.g., "streak!")
+
+    // Slide in horizontally along same baseline
+    const offset = place.dir * SLIDE_OFFSET;
+
+    if (firstShow) {
+        streakShown = true;
+        gsap.set($main, { autoAlpha: 0, x: offset, y: 0 });
+        gsap.to($main, {
+            duration: 0.4,
+            autoAlpha: 1,
+            x: 0, y: 0,
+            ease: "power3.out",
         });
+    } else {
+        // Bump the emote only
+        const $img = $("#main img").first();
+        gsap.fromTo($img, { scale: 1 }, { duration: 0.15, scale: 1.25, yoyo: true, repeat: 1, ease: "power1.out" });
 
-        switch (config.emoteLocation) {
-            default:
-            case 1: // Bottom left
-                $("#main").css({
-                    "bottom": "50px",
-                    "left": "35px",
-                    "transform": "translateX(-150%)"
-                });
-                break;
-            case 2: // Top left
-                $("#main").css({
-                    "top": "50px",
-                    "left": "35px",
-                    "transform": "translateX(-150%)"
-                });
-                break;
-            case 3: // Top right
-                $("#main").css({
-                    "top": "50px",
-                    "right": "35px",
-                    "transform": "translateX(150%)"
-                });
-                break;
-            case 4: // Bottom right
-                $("#main").css({
-                    "bottom": "50px",
-                    "right": "35px",
-                    "transform": "translateX(150%)"
-                });
-                break;
-        }
-
-        $("<img />", { src: config.currentStreak.url }).appendTo("#main");
-        $("#main")
-            .append(
-                " 󠀀  󠀀  x" +
-                config.currentStreak.streak +
-                " " +
-                config.emoteStreakEndingText
-            )
-            .appendTo("#main");
-
-        const tl = gsap.timeline();
-
-        tl.to("#main", 0.8, {
-            x: 0,
-            ease: "elastic.out(1, 0.7)",
-            onComplete: () => {
-                setTimeout(() => {
-                    if (config.emoteLocation === 1 || config.emoteLocation === 2) {
-                        gsap.to("#main", 0.8, {
-                            x: "-150%",
-                            ease: "elastic.in(1, 0.7)",
-                            onComplete: () => {
-                                $("#main").css("display", "none");
-                            }
-                        });
-                    } else {
-                        gsap.to("#main", 0.8, {
-                            x: "150%",
-                            ease: "elastic.in(1, 0.7)",
-                            onComplete: () => {
-                                $("#main").css("display", "none");
-                            }
-                        });
-                    }
-                }, 4000);
-            }
-        });
-
-        config.streakCooldown = new Date().getTime();
+        // Subtle badge pulse
+        gsap.fromTo($main, { scale: 1 }, { duration: 0.12, scale: 1.05, yoyo: true, repeat: 1 });
     }
+
+    // Reset hide timer
+    if (streakHideTimeout) clearTimeout(streakHideTimeout);
+    streakHideTimeout = setTimeout(() => {
+        const $now = $("#main");
+        gsap.to($now, {
+            duration: 0.35,
+            x: offset,
+            y: 0,
+            autoAlpha: 0,
+            ease: "power3.in",
+            onComplete: () => {
+                $now.empty();
+                gsap.set($now, { clearProps: "all" });
+                streakShown = false;
+            },
+        });
+    }, IDLE_BEFORE_HIDE);
 };
 
+
+// ---- unchanged: random emote pop on screen ----
 const getRandomPosPercent = () => [
     Math.floor(Math.random() * 100),
     Math.floor(Math.random() * 100),
@@ -327,10 +382,10 @@ const showEmoteEvent = (url) => {
         const emoteEl = $("#showEmote");
 
         emoteEl.css({
-            position: "absolute", // Ensure the parent container has position: relative
+            position: "absolute",
             left: `${x}%`,
             top: `${y}%`,
-            transform: `translate(-50%, -50%)`, // Center the emote based on its own dimensions
+            transform: `translate(-50%, -50%)`,
         });
 
         $("<img />", {
@@ -350,44 +405,53 @@ const showEmoteEvent = (url) => {
     }
 };
 
-const connect = () => {
-    const chat = new WebSocket("wss://irc-ws.chat.twitch.tv");
-    const timeout = setTimeout(() => {
-        chat.close();
-        chat.connect();
-    }, 10000);
+// ---- WebSocket connect (with simple auto-retry) ----
+let ws = null;
+let reconnectTimer = null;
 
-    chat.onopen = function () {
-        clearInterval(timeout);
-        chat.send(
-            "CAP REQ :twitch.tv/tags twitch.tv/commands twitch.tv/membership"
-        );
-        chat.send("PASS oauth:xd123");
-        chat.send("NICK justinfan123");
-        chat.send("JOIN #" + config.channel);
+function openSocket() {
+    // --- FIX: show invalid channel here too (socket path) ---
+    if (!config.channel) {
+        showInvalidChannel();
+        return;
+    }
+    if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
+
+    ws = new WebSocket("wss://irc-ws.chat.twitch.tv");
+
+    ws.onopen = function () {
+        if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+        ws.send("CAP REQ :twitch.tv/tags twitch.tv/commands twitch.tv/membership");
+        ws.send("PASS oauth:xd123");
+        ws.send("NICK justinfan123");
+        ws.send("JOIN #" + config.channel);
         console.log("Connected to Twitch IRC");
         getEmotes();
     };
 
-    chat.onerror = function () {
-        console.error("There was an error.. disconnected from the IRC");
-        chat.close();
-        chat.connect();
+    ws.onerror = function (e) {
+        console.error("IRC error:", e);
+        try { ws.close(); } catch (_) { }
     };
 
-    chat.onmessage = function (event) {
+    ws.onclose = function () {
+        reconnectTimer = setTimeout(openSocket, 3000);
+    };
+
+    ws.onmessage = function (event) {
         const usedMessage = event.data.split(/\r\n/)[0];
-        const textStart = usedMessage.indexOf(` `); // tag part ends at the first space
-        const fullMessage = usedMessage.slice(0, textStart).split(`;`); // gets the tag part and splits the tags
+        const textStart = usedMessage.indexOf(` `);
+        const fullMessage = usedMessage.slice(0, textStart).split(`;`);
         fullMessage.push(usedMessage.slice(textStart + 1));
 
         if (fullMessage.length > 13) {
             const parsedMessage = fullMessage[fullMessage.length - 1]
                 .split(`${config.channel} :`)
-                .pop(); // gets the raw message
+                .pop();
             let message = parsedMessage.split(" ").includes("ACTION")
                 ? parsedMessage.split("ACTION ").pop().split("")[0]
-                : parsedMessage; // checks for the /me ACTION usage and gets the specific message
+                : parsedMessage;
+
             if (
                 message.toLowerCase().startsWith("!showemote") ||
                 message.toLowerCase().startsWith("!#showemote")
@@ -396,9 +460,12 @@ const connect = () => {
             }
             findEmotes(message, fullMessage);
         }
-        if (fullMessage.length == 2 && fullMessage[0].startsWith("PING")) {
-            console.log("sending pong");
-            chat.send("PONG");
+        if (fullMessage.length === 2 && fullMessage[0].startsWith("PING")) {
+            ws.send("PONG");
         }
     };
+}
+
+const connect = () => {
+    openSocket();
 };
