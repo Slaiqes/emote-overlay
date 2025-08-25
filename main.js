@@ -18,17 +18,26 @@ const config = {
     streakCooldown: new Date().getTime(),
     emotes: [],
 };
+gsap.defaults({ overwrite: "auto", force3D: true });
 
 // --- FIX: show "invalid channel" helper + show-on-load ---
 function showInvalidChannel() {
     $("#errors").html(
-        `Invalid channel. Please enter a channel name in the URL. Example: https://emote.slaiqe.gg/?channel=forsen`
+        `Invalid channel. Please enter a channel name in the URL. Example: https://emote.slaiqe.com/?channel=forsen`
     ).show();
 }
 $(function () {
     if (!config.channel) showInvalidChannel();
 });
-
+function getTransformOriginForCorner(loc) {
+    switch (loc) {
+        case 1: return "left top";     // top-left
+        case 2: return "left bottom";  // bottom-left
+        case 3: return "right bottom"; // bottom-right
+        case 4: return "right top";    // top-right
+        default: return "left top";
+    }
+}
 // ---- NEW: slide-in/out state ----
 let streakHideTimeout = null;
 let streakShown = false;
@@ -47,31 +56,31 @@ function getCornerPlacement(emoteLocation) {
     switch (emoteLocation) {
         case 1: // top-left
             return {
-                css: { position: "fixed", top: EDGE_MARGIN, left: EDGE_MARGIN },
+                css: { position: "fixed", top: EDGE_MARGIN, left: EDGE_MARGIN - 20 },
                 axis: "x",
                 dir: -1,
             };
         case 2: // bottom-left
             return {
-                css: { position: "fixed", bottom: EDGE_MARGIN - 20, left: EDGE_MARGIN },
+                css: { position: "fixed", bottom: EDGE_MARGIN - 20, left: EDGE_MARGIN - 20 },
                 axis: "x",
                 dir: -1,
             };
         case 3: // bottom-right
             return {
-                css: { position: "fixed", bottom: EDGE_MARGIN - 20, right: EDGE_MARGIN },
+                css: { position: "fixed", bottom: EDGE_MARGIN - 20, right: EDGE_MARGIN - 20 },
                 axis: "x",
                 dir: 1,
             };
         case 4: // top-right
             return {
-                css: { position: "fixed", top: EDGE_MARGIN, right: EDGE_MARGIN },
+                css: { position: "fixed", top: EDGE_MARGIN, right: EDGE_MARGIN - 20 },
                 axis: "x",
                 dir: 1,
             };
         default: // fallback to top-left
             return {
-                css: { position: "fixed", top: EDGE_MARGIN, left: EDGE_MARGIN },
+                css: { position: "fixed", top: EDGE_MARGIN, left: EDGE_MARGIN - 20 },
                 axis: "x",
                 dir: -1,
             };
@@ -109,7 +118,7 @@ const getEmotes = async () => {
 
     if (!config.channel) {
         return $("#errors").html(
-            `Invalid channel. Please enter a channel name in the URL. Example: https://emote.slaiqe.gg/?channel=forsen`
+            `Invalid channel. Please enter a channel name in the URL. Example: https://emote.slaiqe.com/?channel=forsen`
         );
     }
 
@@ -319,11 +328,15 @@ const streakEvent = () => {
     // Keep "original" feel by using plain text nodes (no extra wrappers/styles).
     $main.empty();
     $main.append("x" + config.currentStreak.streak + " ");     // streak amount
-    $("<img />", { src: config.currentStreak.url }).appendTo($main); // emote image
+    $("<img />", {
+        src: config.currentStreak.url,
+        css: { marginBottom: "3px" }   // 👈 nudges emote up
+    }).appendTo($main); // emote image
     $main.append(" " + config.emoteStreakEndingText);          // trailing text (e.g., "streak!")
 
     // Slide in horizontally along same baseline
     const offset = place.dir * SLIDE_OFFSET;
+    gsap.set($main, { scaleX: 1, scaleY: 1, skewX: 0, skewY: 0, transformOrigin: getTransformOriginForCorner(config.emoteLocation) });
 
     if (firstShow) {
         streakShown = true;
@@ -333,6 +346,9 @@ const streakEvent = () => {
             autoAlpha: 1,
             x: 0, y: 0,
             ease: "power3.out",
+            onComplete: () => {
+                gsap.fromTo($main, { scaleX: 0.96 }, { duration: 0.12, scaleX: 1, ease: "power1.out" });
+            }
         });
     } else {
         // Bump the emote only
@@ -347,17 +363,41 @@ const streakEvent = () => {
     if (streakHideTimeout) clearTimeout(streakHideTimeout);
     streakHideTimeout = setTimeout(() => {
         const $now = $("#main");
+        const offset = place.dir * SLIDE_OFFSET;
+
+        gsap.killTweensOf($now);
+        gsap.killTweensOf("#main img");
+
+        gsap.set($now, {
+            willChange: "transform",
+            force3D: true,
+            transformOrigin: getTransformOriginForCorner(config.emoteLocation),
+            scaleX: 1, scaleY: 1,
+            autoAlpha: 1,
+            opacity: 1,
+            visibility: "visible"
+        });
+
+        const DURATION = 0.44;
+        const STRETCH_PEAK = 0.22;
+        const END_COMPRESS = 0.26;
+
         gsap.to($now, {
-            duration: 0.35,
+            duration: DURATION,
             x: offset,
-            y: 0,
-            autoAlpha: 0,
-            ease: "power3.in",
+            ease: "expo.in",
+            overwrite: "auto",
+            onUpdate: function () {
+                const t = this.progress();
+
+                const scaleX = 1 + STRETCH_PEAK * Math.sin(Math.PI * t) - END_COMPRESS * t;
+                gsap.set($now, { scaleX });
+            },
             onComplete: () => {
                 $now.empty();
                 gsap.set($now, { clearProps: "all" });
                 streakShown = false;
-            },
+            }
         });
     }, IDLE_BEFORE_HIDE);
 };
